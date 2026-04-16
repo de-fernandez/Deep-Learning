@@ -6,10 +6,6 @@ import pandas as pd
 import time
 import joblib
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 NUM_FEATURES = 51
 SEQ_LEN = 20
 NUM_CLASSES = 2
@@ -23,10 +19,7 @@ st.set_page_config(
 
 st._config.set_option('server.maxUploadSize', 1024)
 
-# ============================================================
 # MODEL
-# ============================================================
-
 class CNN_BiGRU(nn.Module):
     def __init__(self, input_size, hidden_size, num_classes):
         super().__init__()
@@ -49,10 +42,7 @@ class CNN_BiGRU(nn.Module):
         h = self.dropout(h)
         return self.fc(h)
 
-# ============================================================
-# LOAD MODEL + SCALER
-# ============================================================
-
+# LOAD MODEL AND SCALER
 @st.cache_resource
 def load_model():
     model = CNN_BiGRU(NUM_FEATURES, HIDDEN_SIZE, NUM_CLASSES)
@@ -60,33 +50,28 @@ def load_model():
     model.eval()
     return model
 
+
 @st.cache_resource
 def load_scaler():
     return joblib.load("scaler.pkl")
+
 
 model = load_model()
 scaler = load_scaler()
 
 st.success("Model & Scaler loaded successfully!")
 
-# ============================================================
-# PREDICTION FUNCTION (FIXED)
-# ============================================================
-
+# PREDICTION
 def predict_sequence(data_array):
-    """
-    data_array shape: (N, 51)
-    """
     sequences = []
 
     for i in range(len(data_array) - SEQ_LEN):
-        seq = data_array[i:i+SEQ_LEN]
-        sequences.append(seq)
+        sequences.append(data_array[i:i + SEQ_LEN])
 
     sequences = np.array(sequences)
 
-    # SCALE (VERY IMPORTANT FIX)
     n_features = sequences.shape[2]
+
     sequences = scaler.transform(
         sequences.reshape(-1, n_features)
     ).reshape(sequences.shape)
@@ -95,16 +80,12 @@ def predict_sequence(data_array):
 
     with torch.no_grad():
         outputs = model(tensor)
-        probs = torch.softmax(outputs, dim=1).numpy()
-        preds = np.argmax(probs, axis=1)
+        preds = torch.argmax(outputs, dim=1).numpy()
 
-    return preds, probs
+    return preds
 
-# ============================================================
 # UI
-# ============================================================
-
-st.title("CNN-BiGRU Intrusion Detection System")
+st.title("Water Treatment Intrusion Detection System")
 st.write("Upload water treatment sensor data for anomaly detection")
 st.markdown("---")
 
@@ -123,72 +104,55 @@ if uploaded_file is None:
     st.stop()
 
 df = pd.read_csv(uploaded_file)
-
 df.columns = df.columns.str.strip()
 
 st.write("### Preview")
 st.dataframe(df.head())
 
-st.write("Shape:", df.shape)
-
-# FIX: enforce correct feature count
 if df.shape[1] != NUM_FEATURES:
     st.error(f"Expected {NUM_FEATURES} columns, got {df.shape[1]}")
     st.stop()
 
 data = df.values.astype(np.float32)
 
-# ============================================================
 # BATCH MODE
-# ============================================================
-
 if mode == "Batch Detection":
 
     with st.spinner("Running model..."):
-        preds, probs = predict_sequence(data)
+        preds = predict_sequence(data)
 
     labels = [CLASS_LABELS[p] for p in preds]
 
-    results = pd.DataFrame({
-        "Prediction": labels,
-        "Attack %": (probs[:, 0] * 100).round(2),
-        "Normal %": (probs[:, 1] * 100).round(2),
-    })
-
     st.write("### Results")
-    st.dataframe(results)
+
+    st.dataframe(pd.DataFrame({"Prediction": labels}))
 
     st.metric("Total Predictions", len(labels))
     st.metric("Attacks", labels.count("Attack"))
     st.metric("Normals", labels.count("Normal"))
 
-# ============================================================
-# LIVE MODE
-# ============================================================
+    if labels.count("Attack") > 0:
+        st.warning("Attacks detected in dataset!")
+    else:
+        st.success("No attacks detected.")
 
+# LIVE MODE
 elif mode == "Live Simulation":
 
-    st.write("Simulating real-time sensor stream...")
+    st.write("Live simulation running through full dataset...")
 
-    speed = st.slider("Speed (sec)", 0.05, 1.0, 0.1)
+    speed = st.slider("Speed (sec per row)", 0.05, 1.0, 0.1)
 
-    max_rows = st.number_input(
-        "Rows to simulate",
-        min_value=50,
-        max_value=len(data),
-        value=min(200, len(data))
-    )
-
-    if st.button("Start"):
+    if st.button("Start Simulation"):
 
         placeholder = st.empty()
         table = st.empty()
 
         history = []
 
-        for i in range(SEQ_LEN, min(max_rows, len(data))):
+        for i in range(SEQ_LEN, len(data)):
 
-            window = data[i-SEQ_LEN:i]
+            window = data[i - SEQ_LEN:i]
             window = window.reshape(1, SEQ_LEN, NUM_FEATURES)
 
             window = scaler.transform(
@@ -199,27 +163,23 @@ elif mode == "Live Simulation":
 
             with torch.no_grad():
                 out = model(tensor)
-                prob = torch.softmax(out, dim=1).numpy()[0]
-                pred = np.argmax(prob)
+                pred = torch.argmax(out, dim=1).item()
 
             label = CLASS_LABELS[pred]
 
             history.append({
                 "Row": i,
-                "Prediction": label,
-                "Attack %": round(prob[0] * 100, 2),
-                "Normal %": round(prob[1] * 100, 2)
+                "Prediction": label
             })
 
-            df_live = pd.DataFrame(history)
+            # KEEP ONLY LAST 10 ROWS (ROLLING WINDOW)
+            df_live = pd.DataFrame(history[-10:])
 
             color = "🔴" if label == "Attack" else "🟢"
 
-            placeholder.markdown(
-                f"Row {i} → {color} {label}"
-            )
+            placeholder.markdown(f"Row {i} → {color} {label}")
 
-            table.dataframe(df_live.tail(20), use_container_width=True)
+            table.dataframe(df_live, use_container_width=True)
 
             time.sleep(speed)
 
