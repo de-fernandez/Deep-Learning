@@ -1,0 +1,5 @@
+streamlit
+torch==2.2.2+cpu
+numpy
+pandas
+--extra-index-url https://download.pytorch.org/whl/cpu
