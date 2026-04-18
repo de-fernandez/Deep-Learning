@@ -42,52 +42,91 @@ class CNN_BiGRU(nn.Module):
         h = self.dropout(h)
         return self.fc(h)
 
-# LOAD MODEL AND SCALER
+class LSTMModel(nn.Module):
+    def __init__(self, input_size, hidden_size, num_classes):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True, dropout=0.3)
+        self.fc = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        _, (h, _) = self.lstm(x)
+        return self.fc(h[-1])
+
+class GRUModel(nn.Module):
+    def __init__(self, input_size, hidden_size, num_classes):
+        super().__init__()
+        self.gru = nn.GRU(input_size, hidden_size, batch_first=True)
+        self.dropout = nn.Dropout(0.3)
+        self.fc = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        _, h = self.gru(x)
+        out = self.dropout(h[-1])
+        return self.fc(out)
+
 @st.cache_resource
-def load_model():
+def load_cnn_bigru_model():
     model = CNN_BiGRU(NUM_FEATURES, HIDDEN_SIZE, NUM_CLASSES)
     model.load_state_dict(torch.load("cnn_bigru_state_dict.pth", map_location="cpu"))
     model.eval()
     return model
 
+@st.cache_resource
+def load_lstm_model():
+    model = LSTMModel(NUM_FEATURES, HIDDEN_SIZE, NUM_CLASSES)
+    model.load_state_dict(torch.load("lstm_state_dict.pth", map_location="cpu"))
+    model.eval()
+    return model
+
+@st.cache_resource
+def load_gru_model():
+    model = GRUModel(NUM_FEATURES, HIDDEN_SIZE, NUM_CLASSES)
+    model.load_state_dict(torch.load("gru_state_dict.pth", map_location="cpu"))
+    model.eval()
+    return model
 
 @st.cache_resource
 def load_scaler():
     return joblib.load("scaler.pkl")
 
-
-model = load_model()
-scaler = load_scaler()
-
-st.success("Model & Scaler loaded successfully!")
-
 # PREDICTION
 def predict_sequence(data_array):
     sequences = []
-
     for i in range(len(data_array) - SEQ_LEN):
         sequences.append(data_array[i:i + SEQ_LEN])
-
     sequences = np.array(sequences)
-
     n_features = sequences.shape[2]
-
     sequences = scaler.transform(
         sequences.reshape(-1, n_features)
     ).reshape(sequences.shape)
-
     tensor = torch.tensor(sequences, dtype=torch.float32)
-
     with torch.no_grad():
-        outputs = model(tensor)
+        outputs = selected_model(tensor)
         preds = torch.argmax(outputs, dim=1).numpy()
-
     return preds
 
 # UI
-st.title("Water Treatment Intrusion Detection System")
+st.title("🌊 Water Treatment Intrusion Detection System 🌊")
 st.write("Upload water treatment sensor data for anomaly detection")
 st.markdown("---")
+
+cnn_bigru_model = load_cnn_bigru_model()
+lstm_model = load_lstm_model()
+gru_model = load_gru_model()
+scaler = load_scaler()
+
+selected_model_name = st.selectbox(
+    "Select Model:",
+    ["CNN-BiGRU", "LSTM", "GRU"]
+)
+
+model_map = {
+    "CNN-BiGRU": cnn_bigru_model,
+    "LSTM": lstm_model,
+    "GRU": gru_model
+}
+
+selected_model = model_map[selected_model_name]
 
 mode = st.radio(
     "Choose mode:",
@@ -96,37 +135,28 @@ mode = st.radio(
 )
 
 uploaded_file = st.file_uploader(
-    "Upload CSV (51 sensor columns only, max 1GB)",
+    "Upload CSV (51 Sensors, Max 1GB)",
     type=["csv"]
 )
 
 if uploaded_file is None:
     st.stop()
-
 df = pd.read_csv(uploaded_file)
 df.columns = df.columns.str.strip()
-
 st.write("### Preview")
 st.dataframe(df.head())
-
 if df.shape[1] != NUM_FEATURES:
     st.error(f"Expected {NUM_FEATURES} columns, got {df.shape[1]}")
     st.stop()
-
 data = df.values.astype(np.float32)
 
 # BATCH MODE
 if mode == "Batch Detection":
-
     with st.spinner("Running model..."):
         preds = predict_sequence(data)
-
     labels = [CLASS_LABELS[p] for p in preds]
-
     st.write("### Results")
-
     st.dataframe(pd.DataFrame({"Prediction": labels}))
-
     st.metric("Total Predictions", len(labels))
     st.metric("Attacks", labels.count("Attack"))
     st.metric("Normals", labels.count("Normal"))
@@ -140,47 +170,31 @@ if mode == "Batch Detection":
 elif mode == "Live Simulation":
 
     st.write("Live simulation running through full dataset...")
-
     speed = st.slider("Speed (sec per row)", 0.05, 1.0, 0.1)
-
     if st.button("Start Simulation"):
-
         placeholder = st.empty()
         table = st.empty()
-
         history = []
-
         for i in range(SEQ_LEN, len(data)):
-
             window = data[i - SEQ_LEN:i]
             window = window.reshape(1, SEQ_LEN, NUM_FEATURES)
-
             window = scaler.transform(
                 window.reshape(-1, NUM_FEATURES)
             ).reshape(window.shape)
-
             tensor = torch.tensor(window, dtype=torch.float32)
-
             with torch.no_grad():
-                out = model(tensor)
+                out = selected_model(tensor)
+                probs = torch.softmax(out, dim=1)[0]
                 pred = torch.argmax(out, dim=1).item()
-
             label = CLASS_LABELS[pred]
-
             history.append({
-                "Row": i,
-                "Prediction": label
+                "Prediction": label,
+                "Attack %": f"{probs[0].item() * 100:.2f}%",
+                "Normal %": f"{probs[1].item() * 100:.2f}%"
             })
-
-            # KEEP ONLY LAST 10 ROWS (ROLLING WINDOW)
-            df_live = pd.DataFrame(history[-10:])
-
+            df_live = pd.DataFrame(history[-10:]).reset_index(drop=True)
             color = "🔴" if label == "Attack" else "🟢"
-
             placeholder.markdown(f"Row {i} → {color} {label}")
-
             table.dataframe(df_live, use_container_width=True)
-
             time.sleep(speed)
-
         st.success("Simulation complete")
